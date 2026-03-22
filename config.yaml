@@ -1,0 +1,16 @@
+transcription:
+  backend: local
+  local_model: small
+  device: auto
+  compute_type: default
+  beam_size: 5
+  api_model: gpt-4o-mini-transcribe
+
+summary:
+  enabled: true
+  model: gpt-5-mini
+
+output:
+  root_dir: .
+  transcripts_dir: transcripts
+  summaries_dir: summaries
