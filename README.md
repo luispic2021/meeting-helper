@@ -5,11 +5,21 @@ This project transcribes an audio file such as `.m4a` and saves:
 - a plain-text transcript in `./transcripts/`
 - a markdown summary in `./summaries/`
 
+It also supports generating a summary later from an existing transcript file, so you do not need to re-run transcription if your summary step fails or your API account is not funded yet.
+
 ## Output format
 
 Given an input file like `meeting.m4a`, the script creates:
 
 - `./transcripts/meeting-transcript.txt`
+- `./summaries/meeting-summary.md`
+
+If you summarize from an existing transcript like:
+
+- `./transcripts/meeting-transcript.txt`
+
+the script creates:
+
 - `./summaries/meeting-summary.md`
 
 The summary uses exactly these sections:
@@ -26,19 +36,18 @@ By default, the script uses a hybrid setup:
 
 This keeps the raw audio local while still using a hosted model for the summary.
 
-## Project files
-
-- `transcribe_and_summarize.py`
-- `config.yaml`
-- `requirements.txt`
-- `.env.example`
-- `README.md`
-
 ## Requirements
 
 - Python 3.10+
 - `ffmpeg` installed on your system for local audio decoding
-- An OpenAI API key in `.env` only if you want summaries or API-based transcription
+- An OpenAI API key in `.env` **only if** you want summaries or API-based transcription
+- Optional Hugging Face token in `.env` for higher rate limits and smoother local model downloads
+
+## Project files
+
+- `transcribe_and_summarize.py`
+- `requirements.txt`
+- `README.md`
 
 ## Setup
 
@@ -83,52 +92,21 @@ sudo apt install -y ffmpeg
 
 Install `ffmpeg` and make sure it is available on your `PATH`.
 
-### 4) Create your `.env` file
+### 4) Create a `.env` file for sensitive data
 
-Copy `.env.example` to `.env` and add your key only if you plan to use OpenAI-powered steps.
-
-```bash
-cp .env.example .env
-```
-
-Then edit `.env`:
+Create a file named `.env` in the project root:
 
 ```env
-OPENAI_API_KEY=your_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+HUGGINGFACEHUB_API_TOKEN=your_huggingface_token_here
 ```
 
-### 5) Review `config.yaml`
+Notes:
+- `OPENAI_API_KEY` is only required for OpenAI summary generation or API-based transcription.
+- `HUGGINGFACEHUB_API_TOKEN` is optional, but recommended if you use local transcription and want better Hugging Face download behavior.
+- The script maps `HUGGINGFACEHUB_API_TOKEN` to `HF_TOKEN` automatically for compatibility with Hugging Face tooling.
 
-This file sets the default behavior for the script.
-
-```yaml
-transcription:
-  backend: local
-  local_model: small
-  device: auto
-  compute_type: default
-  beam_size: 5
-  api_model: gpt-4o-mini-transcribe
-
-summary:
-  enabled: true
-  model: gpt-5-mini
-
-output:
-  root_dir: .
-  transcripts_dir: transcripts
-  summaries_dir: summaries
-```
-
-## Configuration priority
-
-The script resolves settings in this order:
-
-1. CLI arguments
-2. `config.yaml`
-3. built-in defaults
-
-That means you can keep a sane default in `config.yaml` and override it when needed.
+The script loads `.env` automatically. You can also point to a different file with `--env-file`.
 
 ## Usage
 
@@ -150,50 +128,38 @@ python transcribe_and_summarize.py /path/to/audio.m4a --skip-summary
 python transcribe_and_summarize.py /path/to/audio.m4a --transcription-backend api
 ```
 
+### Generate summary only from an existing transcript
+
+```bash
+python transcribe_and_summarize.py --input-transcript ./transcripts/meeting-transcript.txt
+```
+
+This is useful when:
+- local transcription already succeeded
+- summary failed because your OpenAI account had no quota
+- you want to retry only the summary step later
+
 ### Provide a language hint
 
 ```bash
 python transcribe_and_summarize.py /path/to/audio.m4a --language en
 ```
 
-### Override the local Whisper model
+### Change the local Whisper model
 
 ```bash
 python transcribe_and_summarize.py /path/to/audio.m4a --local-model medium
 ```
 
-### Override the output root
+### Write output somewhere else
 
 ```bash
 python transcribe_and_summarize.py /path/to/audio.m4a --output-root /path/to/output
 ```
 
-### Override config values for one run
-
-```bash
-python transcribe_and_summarize.py /path/to/audio.m4a \
-  --transcription-backend api \
-  --summary-model gpt-5-mini
-```
-
-## API vs local transcription
-
-If you run with:
-
-```bash
-python transcribe_and_summarize.py /path/to/audio.m4a --transcription-backend api
-```
-
-you do **not** need any local Whisper model setup.
-
-That means you can skip local model downloads entirely and use OpenAI for both:
-
-- transcription
-- summary
-
-You still need `OPENAI_API_KEY` in `.env` for that mode.
-
 ## Recommended local model sizes
+
+These are practical starting points:
 
 - `tiny`: fastest, lowest accuracy
 - `base`: light and quick
@@ -201,16 +167,63 @@ You still need `OPENAI_API_KEY` in `.env` for that mode.
 - `medium`: better quality, slower
 - `large-v3`: best quality, heaviest
 
+Example:
+
+```bash
+python transcribe_and_summarize.py ./audio/client-call.m4a --local-model small
+```
+
+## OpenAI-related defaults
+
+- API transcription model: `gpt-4o-mini-transcribe`
+- Summary model: `gpt-5-mini`
+
+You can override them:
+
+```bash
+python transcribe_and_summarize.py yourfile.m4a \
+  --transcription-backend api \
+  --api-transcription-model gpt-4o-mini-transcribe \
+  --summary-model gpt-5-mini
+```
+
+## Notes
+
+- The transcript is saved as `.txt` for easy reuse.
+- The summary is saved as `.md` for easier reading.
+- If you skip the summary, the script does not require `OPENAI_API_KEY` unless you also selected API transcription.
+- `faster-whisper` may download the selected local model the first time you run it.
+- The Hugging Face token is optional for local transcription, but helps avoid anonymous rate limits and slower downloads.
+
 ## Troubleshooting
 
 ### `OPENAI_API_KEY is not set`
 
-Add it to `.env` before using summary generation or API transcription.
+Add it to your `.env` file before running any OpenAI-powered step.
+
+### `Error code: 429 ... insufficient_quota`
+
+Your transcript can still be preserved if transcription already finished.
+
+Once your OpenAI account is funded, run summary-only mode:
+
+```bash
+python transcribe_and_summarize.py --input-transcript ./transcripts/meeting-transcript.txt
+```
+
+### Hugging Face warning about unauthenticated requests
+
+Add this to your `.env`:
+
+```env
+HUGGINGFACEHUB_API_TOKEN=your_huggingface_token_here
+```
+
+The script will map it to `HF_TOKEN` automatically.
 
 ### `Local transcription returned no text`
 
 Check that:
-
 - the file really contains speech
 - `ffmpeg` is installed and available on your `PATH`
 - the chosen model is appropriate for your machine
@@ -226,15 +239,13 @@ pip install -r requirements.txt
 ### Local transcription is too slow
 
 Try one of these:
+- use `--local-model base`
+- use `--compute-type int8`
+- use `--device cuda` if you have a supported NVIDIA GPU
 
-- change `local_model` to `base`
-- change `compute_type` to `int8`
-- use `device: cuda` if you have a supported NVIDIA GPU
-- temporarily switch to `--transcription-backend api`
+## Example end-to-end commands
 
-## Example workflows
-
-### Hybrid mode from config
+### Hybrid mode
 
 ```bash
 python transcribe_and_summarize.py ./audio/meeting.m4a
@@ -244,6 +255,12 @@ python transcribe_and_summarize.py ./audio/meeting.m4a
 
 ```bash
 python transcribe_and_summarize.py ./audio/meeting.m4a --skip-summary --local-model base
+```
+
+### Retry summary later from saved transcript
+
+```bash
+python transcribe_and_summarize.py --input-transcript ./transcripts/meeting-transcript.txt
 ```
 
 ### API transcript + API summary

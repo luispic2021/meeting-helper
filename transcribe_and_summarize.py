@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
-"""Transcribe an audio file and generate a structured summary.
+"""Transcribe an audio file and optionally generate a structured summary.
 
-Supports two transcription backends:
-- local: faster-whisper
-- api: OpenAI API
+Default behavior:
+- Transcription: local with faster-whisper
+- Summary: OpenAI API
 
-Supports summary generation with OpenAI API.
+Outputs:
+- ./transcripts/<audio-name>-transcript.txt
+- ./summaries/<audio-name>-summary.md
 
-Configuration priority:
-1. CLI arguments
-2. config.yaml
-3. Built-in defaults
+New in v1.1.0:
+- Supports --input-transcript to generate a summary from an existing transcript file
+- Supports HUGGINGFACEHUB_API_TOKEN by mapping it to HF_TOKEN for Hugging Face downloads
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
-from typing import Any, Optional
-
-import yaml
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover
     load_dotenv = None
 
-DEFAULT_ENV_FILE = ".env"
-DEFAULT_CONFIG_FILE = "config.yaml"
+TRANSCRIPTS_DIR = Path("transcripts")
+SUMMARIES_DIR = Path("summaries")
+DEFAULT_LOCAL_MODEL = "small"
 DEFAULT_API_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_SUMMARY_MODEL = "gpt-5-mini"
+DEFAULT_ENV_FILE = ".env"
 
 SUMMARY_PROMPT_TEMPLATE = """
 You are summarizing a transcript from an audio conversation.
@@ -53,47 +53,32 @@ Transcript:
 """.strip()
 
 
-DEFAULT_CONFIG: dict[str, Any] = {
-    "transcription": {
-        "backend": "local",
-        "local_model": "small",
-        "device": "auto",
-        "compute_type": "default",
-        "beam_size": 5,
-        "api_model": DEFAULT_API_TRANSCRIPTION_MODEL,
-    },
-    "summary": {
-        "enabled": True,
-        "model": DEFAULT_SUMMARY_MODEL,
-    },
-    "output": {
-        "root_dir": ".",
-        "transcripts_dir": "transcripts",
-        "summaries_dir": "summaries",
-    },
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Transcribe an audio file and optionally generate a structured summary."
     )
     parser.add_argument(
         "audio_file",
+        nargs="?",
         type=Path,
         help="Path to the input audio file (for example: .m4a, .mp3, .wav).",
     )
     parser.add_argument(
-        "--config",
+        "--input-transcript",
         type=Path,
-        default=Path(DEFAULT_CONFIG_FILE),
-        help=f"Path to config YAML file. Default: ./{DEFAULT_CONFIG_FILE}",
+        help="Path to an existing transcript .txt file. If provided, transcription is skipped and only summary generation runs.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Root directory where ./transcripts and ./summaries will be created.",
     )
     parser.add_argument(
         "--env-file",
         type=Path,
         default=Path(DEFAULT_ENV_FILE),
-        help=f"Path to the .env file. Default: ./{DEFAULT_ENV_FILE}",
+        help="Path to the .env file used for sensitive settings. Default: ./.env",
     )
     parser.add_argument(
         "--language",
@@ -101,26 +86,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional ISO language hint such as 'en' or 'es'.",
     )
     parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=None,
-        help="Override output root directory.",
-    )
-    parser.add_argument(
-        "--transcripts-dir",
-        default=None,
-        help="Override transcript output directory name or path.",
-    )
-    parser.add_argument(
-        "--summaries-dir",
-        default=None,
-        help="Override summary output directory name or path.",
-    )
-    parser.add_argument(
         "--transcription-backend",
         choices=["local", "api"],
-        default=None,
-        help="Transcription backend to use.",
+        default="local",
+        help="Use local faster-whisper transcription or OpenAI API transcription. Default: local",
     )
     parser.add_argument(
         "--skip-summary",
@@ -129,37 +98,55 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--local-model",
-        default=None,
-        help="faster-whisper model size/name for local transcription.",
+        default=DEFAULT_LOCAL_MODEL,
+        help=(
+            "faster-whisper model size/name for local transcription. "
+            f"Default: {DEFAULT_LOCAL_MODEL}"
+        ),
     )
     parser.add_argument(
         "--device",
         choices=["auto", "cpu", "cuda"],
-        default=None,
-        help="Device to use for local transcription.",
+        default="auto",
+        help="Device to use for local transcription. Default: auto",
     )
     parser.add_argument(
         "--compute-type",
-        default=None,
-        help="Compute type for faster-whisper local inference.",
+        default="default",
+        help=(
+            "Compute type for faster-whisper local inference, for example: "
+            "default, int8, int8_float16, float16. Default: default"
+        ),
     )
     parser.add_argument(
         "--beam-size",
         type=int,
-        default=None,
-        help="Beam size for local transcription.",
+        default=5,
+        help="Beam size for local transcription. Default: 5",
     )
     parser.add_argument(
         "--api-transcription-model",
-        default=None,
-        help="OpenAI model to use for API transcription.",
+        default=DEFAULT_API_TRANSCRIPTION_MODEL,
+        help=(
+            "OpenAI model to use when --transcription-backend api is selected. "
+            f"Default: {DEFAULT_API_TRANSCRIPTION_MODEL}"
+        ),
     )
     parser.add_argument(
         "--summary-model",
-        default=None,
-        help="OpenAI model to use for summary generation.",
+        default=DEFAULT_SUMMARY_MODEL,
+        help=f"OpenAI model to use for summary generation. Default: {DEFAULT_SUMMARY_MODEL}",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args()
+
+    if not args.audio_file and not args.input_transcript:
+        parser.error("You must provide either an audio_file or --input-transcript.")
+
+    if args.audio_file and args.input_transcript:
+        parser.error("Provide either an audio_file or --input-transcript, not both.")
+
+    return args
 
 
 def load_environment(env_file: Path) -> None:
@@ -174,116 +161,10 @@ def load_environment(env_file: Path) -> None:
     else:
         load_dotenv(override=False)
 
-
-def load_config(config_path: Path) -> dict[str, Any]:
-    config_path = config_path.expanduser().resolve()
-    if not config_path.exists():
-        return {}
-
-    with config_path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-
-    if not isinstance(data, dict):
-        raise ValueError("config.yaml must contain a top-level mapping/object.")
-
-    return data
-
-
-def nested_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
-    current: Any = data
-    for key in keys:
-        if not isinstance(current, dict) or key not in current:
-            return default
-        current = current[key]
-    return current
-
-
-def resolve_settings(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    output_root_value = args.output_root or nested_get(
-        config, "output", "root_dir", default=DEFAULT_CONFIG["output"]["root_dir"]
-    )
-    transcripts_dir_value = args.transcripts_dir or nested_get(
-        config,
-        "output",
-        "transcripts_dir",
-        default=DEFAULT_CONFIG["output"]["transcripts_dir"],
-    )
-    summaries_dir_value = args.summaries_dir or nested_get(
-        config,
-        "output",
-        "summaries_dir",
-        default=DEFAULT_CONFIG["output"]["summaries_dir"],
-    )
-
-    return {
-        "language": args.language,
-        "transcription_backend": args.transcription_backend
-        or nested_get(
-            config,
-            "transcription",
-            "backend",
-            default=DEFAULT_CONFIG["transcription"]["backend"],
-        ),
-        "local_model": args.local_model
-        or nested_get(
-            config,
-            "transcription",
-            "local_model",
-            default=DEFAULT_CONFIG["transcription"]["local_model"],
-        ),
-        "device": args.device
-        or nested_get(
-            config,
-            "transcription",
-            "device",
-            default=DEFAULT_CONFIG["transcription"]["device"],
-        ),
-        "compute_type": args.compute_type
-        or nested_get(
-            config,
-            "transcription",
-            "compute_type",
-            default=DEFAULT_CONFIG["transcription"]["compute_type"],
-        ),
-        "beam_size": args.beam_size
-        or int(
-            nested_get(
-                config,
-                "transcription",
-                "beam_size",
-                default=DEFAULT_CONFIG["transcription"]["beam_size"],
-            )
-        ),
-        "api_transcription_model": args.api_transcription_model
-        or nested_get(
-            config,
-            "transcription",
-            "api_model",
-            default=DEFAULT_CONFIG["transcription"]["api_model"],
-        ),
-        "summary_enabled": (
-            False
-            if args.skip_summary
-            else bool(
-                nested_get(
-                    config,
-                    "summary",
-                    "enabled",
-                    default=DEFAULT_CONFIG["summary"]["enabled"],
-                )
-            )
-        ),
-        "summary_model": args.summary_model
-        or nested_get(
-            config,
-            "summary",
-            "model",
-            default=DEFAULT_CONFIG["summary"]["model"],
-        ),
-        "output_root": Path(output_root_value),
-        "transcripts_dir": Path(transcripts_dir_value),
-        "summaries_dir": Path(summaries_dir_value),
-    }
+    # Hugging Face libraries commonly look for HF_TOKEN, but some users prefer
+    # storing the token as HUGGINGFACEHUB_API_TOKEN in .env.
+    if not os.getenv("HF_TOKEN") and os.getenv("HUGGINGFACEHUB_API_TOKEN"):
+        os.environ["HF_TOKEN"] = os.environ["HUGGINGFACEHUB_API_TOKEN"]
 
 
 def validate_audio_file(audio_file: Path) -> Path:
@@ -295,6 +176,15 @@ def validate_audio_file(audio_file: Path) -> Path:
     return audio_file
 
 
+def validate_transcript_file(transcript_file: Path) -> Path:
+    transcript_file = transcript_file.expanduser().resolve()
+    if not transcript_file.exists():
+        raise FileNotFoundError(f"Transcript file not found: {transcript_file}")
+    if not transcript_file.is_file():
+        raise ValueError(f"Path is not a file: {transcript_file}")
+    return transcript_file
+
+
 def ensure_api_key() -> None:
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError(
@@ -302,25 +192,26 @@ def ensure_api_key() -> None:
         )
 
 
-def resolve_output_dir(root: Path, child: Path) -> Path:
-    return child if child.is_absolute() else root / child
-
-
-def get_output_paths(
-    audio_file: Path,
-    output_root: Path,
-    transcripts_dir: Path,
-    summaries_dir: Path,
-) -> tuple[Path, Path]:
+def get_output_paths_from_audio(audio_file: Path, output_root: Path) -> tuple[Path, Path]:
     stem = audio_file.stem
-    transcripts_path = resolve_output_dir(output_root, transcripts_dir)
-    summaries_path = resolve_output_dir(output_root, summaries_dir)
-    transcripts_path.mkdir(parents=True, exist_ok=True)
-    summaries_path.mkdir(parents=True, exist_ok=True)
+    transcripts_dir = output_root / TRANSCRIPTS_DIR
+    summaries_dir = output_root / SUMMARIES_DIR
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+    summaries_dir.mkdir(parents=True, exist_ok=True)
 
-    transcript_file = transcripts_path / f"{stem}-transcript.txt"
-    summary_file = summaries_path / f"{stem}-summary.md"
-    return transcript_file, summary_file
+    transcript_path = transcripts_dir / f"{stem}-transcript.txt"
+    summary_path = summaries_dir / f"{stem}-summary.md"
+    return transcript_path, summary_path
+
+
+def get_summary_path_from_transcript(transcript_file: Path, output_root: Path) -> Path:
+    summaries_dir = output_root / SUMMARIES_DIR
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = transcript_file.stem
+    suffix = "-transcript"
+    base_name = stem[:-len(suffix)] if stem.endswith(suffix) else stem
+    return summaries_dir / f"{base_name}-summary.md"
 
 
 def write_text_file(path: Path, content: str) -> None:
@@ -343,14 +234,11 @@ def transcribe_audio_api(audio_file: Path, model: str, language: Optional[str]) 
     client = get_openai_client()
 
     with audio_file.open("rb") as file_obj:
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "file": file_obj,
-        }
-        if language:
-            kwargs["language"] = language
-
-        response = client.audio.transcriptions.create(**kwargs)
+        response = client.audio.transcriptions.create(
+            model=model,
+            file=file_obj,
+            language=language,
+        )
 
     text = getattr(response, "text", None)
     if not text:
@@ -373,18 +261,16 @@ def transcribe_audio_local(
             "The 'faster-whisper' package is not installed. Run: pip install -r requirements.txt"
         ) from exc
 
-    whisper_kwargs: dict[str, Any] = {"device": device}
+    whisper_kwargs = {"device": device}
     if compute_type != "default":
         whisper_kwargs["compute_type"] = compute_type
 
     model = WhisperModel(model_name, **whisper_kwargs)
-    transcribe_kwargs: dict[str, Any] = {
-        "beam_size": beam_size,
-    }
-    if language:
-        transcribe_kwargs["language"] = language
-
-    segments, _info = model.transcribe(str(audio_file), **transcribe_kwargs)
+    segments, _info = model.transcribe(
+        str(audio_file),
+        language=language,
+        beam_size=beam_size,
+    )
 
     transcript_parts: list[str] = []
     for segment in segments:
@@ -394,78 +280,113 @@ def transcribe_audio_local(
 
     transcript = " ".join(transcript_parts).strip()
     if not transcript:
-        raise RuntimeError(
-            "Local transcription returned no text. Verify the audio file and that ffmpeg is installed."
-        )
+        raise RuntimeError("Local transcription returned no text.")
     return transcript
 
 
 def summarize_transcript(transcript: str, model: str) -> str:
     ensure_api_key()
     client = get_openai_client()
-    prompt = SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
 
+    prompt = SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
     response = client.responses.create(
         model=model,
         input=prompt,
     )
 
-    output_text = getattr(response, "output_text", "")
-    if output_text:
-        return output_text.strip()
+    summary_text = getattr(response, "output_text", None)
+    if summary_text:
+        return summary_text.strip()
 
-    raise RuntimeError("Summary response did not contain output_text.")
+    try:
+        chunks: list[str] = []
+        for item in response.output:
+            for content in getattr(item, "content", []):
+                text_value = getattr(content, "text", None)
+                if text_value:
+                    chunks.append(text_value)
+        if chunks:
+            return "\n".join(chunks).strip()
+    except Exception:
+        pass
+
+    raise RuntimeError("Summary response did not contain text.")
+
+
+def read_transcript_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8").strip()
 
 
 def main() -> int:
     args = parse_args()
     load_environment(args.env_file)
-    config = load_config(args.config)
-    settings = resolve_settings(args, config)
 
-    audio_file = validate_audio_file(args.audio_file)
-    transcript_path, summary_path = get_output_paths(
-        audio_file=audio_file,
-        output_root=settings["output_root"],
-        transcripts_dir=settings["transcripts_dir"],
-        summaries_dir=settings["summaries_dir"],
-    )
+    try:
+        if args.input_transcript:
+            transcript_file = validate_transcript_file(args.input_transcript)
+            transcript = read_transcript_file(transcript_file)
+            summary_path = get_summary_path_from_transcript(
+                transcript_file=transcript_file,
+                output_root=args.output_root.expanduser().resolve(),
+            )
 
-    if settings["transcription_backend"] == "api":
-        transcript = transcribe_audio_api(
+            if not transcript:
+                raise RuntimeError("Transcript file is empty.")
+
+            if args.skip_summary:
+                print("Summary skipped. Existing transcript was not modified.")
+                return 0
+
+            summary = summarize_transcript(
+                transcript=transcript,
+                model=args.summary_model,
+            )
+            write_text_file(summary_path, summary)
+            print(f"Summary saved: {summary_path}")
+            return 0
+
+        audio_file = validate_audio_file(args.audio_file)
+        transcript_path, summary_path = get_output_paths_from_audio(
             audio_file=audio_file,
-            model=settings["api_transcription_model"],
-            language=settings["language"],
-        )
-    else:
-        transcript = transcribe_audio_local(
-            audio_file=audio_file,
-            model_name=settings["local_model"],
-            language=settings["language"],
-            device=settings["device"],
-            compute_type=settings["compute_type"],
-            beam_size=settings["beam_size"],
+            output_root=args.output_root.expanduser().resolve(),
         )
 
-    write_text_file(transcript_path, transcript)
-    print(f"Transcript saved to: {transcript_path}")
+        if args.transcription_backend == "api":
+            transcript = transcribe_audio_api(
+                audio_file=audio_file,
+                model=args.api_transcription_model,
+                language=args.language,
+            )
+        else:
+            transcript = transcribe_audio_local(
+                audio_file=audio_file,
+                model_name=args.local_model,
+                language=args.language,
+                device=args.device,
+                compute_type=args.compute_type,
+                beam_size=args.beam_size,
+            )
 
-    if settings["summary_enabled"]:
+        write_text_file(transcript_path, transcript)
+        print(f"Transcript saved: {transcript_path}")
+
+        if args.skip_summary:
+            print("Summary skipped by request.")
+            return 0
+
         summary = summarize_transcript(
             transcript=transcript,
-            model=settings["summary_model"],
+            model=args.summary_model,
         )
         write_text_file(summary_path, summary)
-        print(f"Summary saved to: {summary_path}")
-    else:
-        print("Summary generation skipped.")
+        print(f"Summary saved: {summary_path}")
+        return 0
 
-    return 0
+    except Exception as exc:
+        # If summary fails after transcript succeeded, the transcript is still preserved.
+        print(f"Error: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:  # pragma: no cover
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())
